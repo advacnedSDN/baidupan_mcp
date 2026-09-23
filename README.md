@@ -4,7 +4,7 @@
 
 ## 前置条件
 
-- Node.js >= 18（本机当前未检测到 node，请先自行安装）
+- Node.js >= 18（已在 v22 上实测通过；没有系统 node 时可装到用户目录，见下文「接入实录」）
 - 已在 [百度网盘开放平台](https://pan.baidu.com/union) 创建应用，拿到 `AppKey` / `SecretKey`
   - 应用类型选「个人应用」通常即可用于 list/search/download/upload
   - **分享链接（baidu_create_share_link）需要额外的分享权限审核**，个人应用不一定能通过，失败属预期，非本项目 bug
@@ -30,7 +30,28 @@ Token 过期前 MCP server 会自动用 `refresh_token` 续期，无需重复授
 
 ## 注册到 Claude Code
 
-在项目根目录或全局配置里加一个 MCP server 条目，例如项目级 `.mcp.json`：
+推荐用 `claude mcp add` 注册到用户级（所有项目可用），并用 Node 自带的 `--env-file` 显式指定 `.env`：
+
+```bash
+claude mcp add baidu-netdisk -s user -- \
+  "$(command -v node)" --env-file=/绝对路径/baidu-netdisk-mcp/.env \
+  /绝对路径/baidu-netdisk-mcp/src/server.js
+```
+
+为什么要 `--env-file`：`src/server.js` 用 `dotenv/config` 读 `.env`，而 dotenv 默认从**当前工作目录**找 `.env`。Claude Code 拉起 MCP 子进程时，工作目录是你打开 Claude Code 的项目目录，不是本仓库，所以只靠 dotenv 会读不到 AppKey。`--env-file`（Node >= 20.6）用绝对路径加载，不依赖工作目录，密钥也不用写进 Claude 的配置文件。
+
+`node` 也建议写绝对路径：Claude Code 未必继承你交互 shell 的 `PATH`（比如 node 装在 `~/.local/node/bin`、nvm 等位置时）。
+
+验证：
+
+```bash
+claude mcp get baidu-netdisk   # Status 应为 ✔ Connected
+```
+
+然后在 Claude Code 里重开会话，就能看到 `mcp__baidu-netdisk__*` 这组工具。
+
+<details>
+<summary>备选：项目级 <code>.mcp.json</code>（把 env 写进配置）</summary>
 
 ```json
 {
@@ -47,13 +68,40 @@ Token 过期前 MCP server 会自动用 `refresh_token` 续期，无需重复授
 }
 ```
 
-或者用命令行：
+注意这样密钥会以明文存在 `.mcp.json` 里，别把它提交到仓库。
+</details>
 
-```bash
-claude mcp add baidu-netdisk node /绝对路径/baidu-netdisk-mcp/src/server.js
-```
+## 接入实录（Linux，2026-09）
 
-如果用命令行添加，记得在运行 Claude Code 前把 `BAIDU_APP_KEY`/`BAIDU_SECRET_KEY` 也导出到环境变量，或者改用上面的 `.mcp.json` 写法把 env 写死在配置里。
+下面是在一台没有系统 Node 的 Linux 机器上，从零接入 Claude Code 的实际步骤。
+
+1. **安装 Node 到用户目录**（不需要 sudo）：从 nodejs.org 下载 Linux x64 的 v22 LTS 预编译包，解压到 `~/.local/node`，把 `~/.local/node/bin` 加进 `PATH`。
+2. **安装依赖**：`npm install`（生成的 `package-lock.json` 已提交，锁定依赖版本）。
+3. **百度开放平台建应用**：在 <https://pan.baidu.com/union> 创建个人应用，把 AppKey / SecretKey 填进 `.env`（`cp .env.example .env`；`.env` 已在 `.gitignore` 里，建议 `chmod 600 .env`）。
+4. **授权**：`npm run authorize`，按提示在浏览器打开网址、输入 code，完成后 token 写入 `~/.baidu-netdisk-mcp/tokens.json`（权限 600）。
+5. **注册到 Claude Code**：
+
+   ```bash
+   claude mcp add baidu-netdisk -s user -- \
+     ~/.local/node/bin/node --env-file=$HOME/code/baidu-netdisk-mcp/.env \
+     $HOME/code/baidu-netdisk-mcp/src/server.js
+   ```
+
+6. **确认连接**：`claude mcp get baidu-netdisk` 显示 `✔ Connected`，重开 Claude Code 会话。
+
+### 实测结果
+
+| 工具 | 结果 | 备注 |
+| --- | --- | --- |
+| `baidu_list_dir` | ✅ | 根目录正常列出，含大小、修改时间、fs_id |
+| `baidu_search_files` | ✅ | 递归搜索正常；百度搜索是分词/模糊匹配，结果可能混入不相关文件 |
+| `baidu_upload_file` | ✅ | 上传小文件成功，`list_dir` 立即可见 |
+| `baidu_download_file` | ✅ | 下载内容与上传逐字节一致 |
+| `baidu_create_share_link` | 未测 | 会生成公开链接，且需要应用有分享权限 |
+
+- **刚上传的文件立刻下载会报 `File not found`**：`list_dir` 已经能看到，但 `search_files` 还搜不到；等十几秒后下载和搜索都正常。推测下载时按路径查文件依赖百度的搜索索引，新文件入索引有延迟。上传后如需立即下载，建议稍等或重试。
+- `access_token` 过期后 server 会自动用 `refresh_token` 续期并写回 `tokens.json`，实测无需重新授权。
+- 本 server 没有删除工具，测试产生的文件需到网盘客户端手动删除。
 
 ## 部署到云端（远程 HTTP 模式）
 
@@ -128,7 +176,9 @@ claude mcp add --transport http baidu-netdisk https://your-domain.example.com/mc
 
 ## 已知限制 / 待验证
 
-- 未在本机实际跑通（环境没有 node），逻辑基于百度开放平台公开文档实现，接入后如遇 `errno` 报错，多半是该应用未获得对应接口权限，去开发者后台查看接口权限列表。
+- 如遇 `errno` 报错，多半是该应用未获得对应接口权限，去开发者后台查看接口权限列表。
+- 新上传文件短时间内无法通过下载/搜索找到（索引延迟，见「实测结果」）。
+- 没有删除/移动/重命名工具。
 - 个人开发者应用通常有网盘容量/接口调用频率限制（历史上常见 20GB 总量限制），大文件上传前请确认额度。
 - 上传分片大小固定 4MB，超大文件会顺序上传多个分片，暂无并发/断点续传。
 - HTTP 模式（`src/httpServer.js`）用的是无状态（stateless）Streamable HTTP，每个请求起一个新的 McpServer 实例，实现简单但没有服务端主动推送/多会话能力；单用户个人使用够用，多人共用建议按用户拆 token 存储路径。
