@@ -98,10 +98,15 @@ claude mcp get baidu-netdisk   # Status 应为 ✔ Connected
 | `baidu_upload_file` | ✅ | 上传小文件成功，`list_dir` 立即可见 |
 | `baidu_download_file` | ✅ | 下载内容与上传逐字节一致 |
 | `baidu_create_share_link` | 未测 | 会生成公开链接，且需要应用有分享权限 |
+| `baidu_create_folder` | ✅ | 多层嵌套一次建好；重复创建报 `-8`（已存在） |
+| `baidu_rename` | ✅ | 正常；源不存在报 `-9`；新名字含 `/` 会被拒绝 |
+| `baidu_move` | ✅ | 正常；目标重名默认报错不覆盖；可带 `newName` 移动时改名 |
+| `baidu_delete` | ✅ | 文件和整个文件夹都能删；`/`、`/xx/../` 这类根路径被拒绝 |
+
+新增的 4 个工具是通过 MCP stdio 客户端端到端跑的（建目录 → 上传 → 改名 → 移动 → 冲突 → 删除 → 清理），20 项检查全部通过。
 
 - **刚上传的文件立刻下载会报 `File not found`**：`list_dir` 已经能看到，但 `search_files` 还搜不到；等十几秒后下载和搜索都正常。推测下载时按路径查文件依赖百度的搜索索引，新文件入索引有延迟。上传后如需立即下载，建议稍等或重试。
 - `access_token` 过期后 server 会自动用 `refresh_token` 续期并写回 `tokens.json`，实测无需重新授权。
-- 本 server 没有删除工具，测试产生的文件需到网盘客户端手动删除。
 
 ## 部署到云端（远程 HTTP 模式）
 
@@ -173,12 +178,18 @@ claude mcp add --transport http baidu-netdisk https://your-domain.example.com/mc
 | `baidu_download_file` | 下载网盘文件到本地路径 |
 | `baidu_upload_file` | 上传本地文件到网盘指定路径（自动分片、覆盖同名文件） |
 | `baidu_create_share_link` | 为文件/文件夹创建分享链接（需应用有分享权限） |
+| `baidu_create_folder` | 创建文件夹（自动补齐中间层级；同名已存在时报错） |
+| `baidu_delete` | 删除一个或多个文件/文件夹（进网盘回收站；拒绝删除根目录 `/`） |
+| `baidu_move` | 把文件/文件夹移到目标文件夹，可同时改名；重名时可选 `fail`（默认）/`newcopy`/`overwrite`/`skip` |
+| `baidu_rename` | 原地重命名文件/文件夹 |
+
+另外，`baidu_upload_file` 的目标路径里不存在的文件夹会被自动创建，所以「往某个新文件夹里放文件」直接上传即可。
 
 ## 已知限制 / 待验证
 
 - 如遇 `errno` 报错，多半是该应用未获得对应接口权限，去开发者后台查看接口权限列表。
 - 新上传文件短时间内无法通过下载/搜索找到（索引延迟，见「实测结果」）。
-- 没有删除/移动/重命名工具。
+- 删除的文件进百度网盘回收站（保留期视会员等级而定），本 server 不提供回收站恢复/清空。
 - 个人开发者应用通常有网盘容量/接口调用频率限制（历史上常见 20GB 总量限制），大文件上传前请确认额度。
 - 上传分片大小固定 4MB，超大文件会顺序上传多个分片，暂无并发/断点续传。
 - HTTP 模式（`src/httpServer.js`）用的是无状态（stateless）Streamable HTTP，每个请求起一个新的 McpServer 实例，实现简单但没有服务端主动推送/多会话能力；单用户个人使用够用，多人共用建议按用户拆 token 存储路径。

@@ -6,6 +6,10 @@ import {
   downloadFile,
   uploadFile,
   createShareLink,
+  createFolder,
+  deletePaths,
+  movePaths,
+  renamePath,
 } from "./baiduClient.js";
 
 function ok(value) {
@@ -23,7 +27,7 @@ function fail(err) {
 export function createMcpServer() {
   const server = new McpServer({
     name: "baidu-netdisk-mcp",
-    version: "0.1.0",
+    version: "0.2.0",
   });
 
   server.registerTool(
@@ -118,6 +122,94 @@ export function createMcpServer() {
     async ({ remotePaths, password, expireDays }) => {
       try {
         return ok(await createShareLink(remotePaths, { password, expireDays }));
+      } catch (e) {
+        return fail(e);
+      }
+    }
+  );
+
+  server.registerTool(
+    "baidu_create_folder",
+    {
+      title: "Create a folder on Baidu Netdisk",
+      description:
+        "Create a folder (including missing parent folders) at the given path. Fails if something already exists there.",
+      inputSchema: {
+        path: z.string().describe("Absolute netdisk path of the folder to create, e.g. /工作/2026"),
+      },
+    },
+    async ({ path }) => {
+      try {
+        return ok(await createFolder(path));
+      } catch (e) {
+        return fail(e);
+      }
+    }
+  );
+
+  server.registerTool(
+    "baidu_delete",
+    {
+      title: "Delete files/folders on Baidu Netdisk",
+      description:
+        "Delete one or more files or folders (folders are deleted with their contents). Deleted items go to the Baidu Netdisk recycle bin.",
+      inputSchema: {
+        paths: z.array(z.string()).min(1).describe("Absolute netdisk paths to delete"),
+      },
+    },
+    async ({ paths }) => {
+      try {
+        return ok(await deletePaths(paths));
+      } catch (e) {
+        return fail(e);
+      }
+    }
+  );
+
+  server.registerTool(
+    "baidu_move",
+    {
+      title: "Move files/folders on Baidu Netdisk",
+      description:
+        "Move one or more files or folders into a destination folder, optionally renaming them.",
+      inputSchema: {
+        items: z
+          .array(
+            z.object({
+              path: z.string().describe("Absolute netdisk path of the item to move"),
+              destDir: z.string().describe("Destination folder path"),
+              newName: z.string().optional().describe("New name at the destination; defaults to the current name"),
+            })
+          )
+          .min(1),
+        onConflict: z
+          .enum(["fail", "newcopy", "overwrite", "skip"])
+          .default("fail")
+          .describe("What to do if the destination name is taken"),
+      },
+    },
+    async ({ items, onConflict }) => {
+      try {
+        return ok(await movePaths(items, onConflict));
+      } catch (e) {
+        return fail(e);
+      }
+    }
+  );
+
+  server.registerTool(
+    "baidu_rename",
+    {
+      title: "Rename a file/folder on Baidu Netdisk",
+      description: "Rename a file or folder in place (same parent folder).",
+      inputSchema: {
+        path: z.string().describe("Absolute netdisk path of the item to rename"),
+        newName: z.string().describe("New name (bare name, not a path)"),
+      },
+    },
+    async ({ path, newName }) => {
+      try {
+        return ok(await renamePath(path, newName));
       } catch (e) {
         return fail(e);
       }

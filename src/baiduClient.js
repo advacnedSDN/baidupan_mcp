@@ -7,21 +7,35 @@ const UPLOAD_BASE = "https://d.pcs.baidu.com/rest/2.0/pcs/superfile2";
 const SHARE_URL = "https://pan.baidu.com/share/set";
 const SLICE_SIZE = 4 * 1024 * 1024; // 4MB, standard slice size for xpan uploads
 
+const ERRNO_HINTS = {
+  "-6": "access token invalid, re-run `npm run authorize`",
+  "-7": "invalid file name or no access to this path",
+  "-8": "a file or folder with that name already exists",
+  "-9": "file or folder not found",
+  12: "batch operation failed",
+};
+
+function baiduError(data) {
+  const describe = (errno) => `errno ${errno}${ERRNO_HINTS[errno] ? ` (${ERRNO_HINTS[errno]})` : ""}`;
+  // filemanager puts the real per-item reason inside `info`.
+  const items = (data.info || []).filter((i) => i.errno && i.errno !== 0);
+  if (items.length) {
+    return new Error(`Baidu API error: ${items.map((i) => `${i.path}: ${describe(i.errno)}`).join("; ")}`);
+  }
+  return new Error(`Baidu API error ${describe(data.errno)}: ${data.errmsg || JSON.stringify(data)}`);
+}
+
 async function apiGet(url) {
   const res = await fetch(url);
   const data = await res.json();
-  if (data.errno && data.errno !== 0) {
-    throw new Error(`Baidu API error ${data.errno}: ${data.errmsg || JSON.stringify(data)}`);
-  }
+  if (data.errno && data.errno !== 0) throw baiduError(data);
   return data;
 }
 
 async function apiPost(url, body, opts = {}) {
   const res = await fetch(url, { method: "POST", body, ...opts });
   const data = await res.json();
-  if (data.errno && data.errno !== 0) {
-    throw new Error(`Baidu API error ${data.errno}: ${data.errmsg || JSON.stringify(data)}`);
-  }
+  if (data.errno && data.errno !== 0) throw baiduError(data);
   return data;
 }
 
@@ -176,4 +190,67 @@ export async function createShareLink(remotePaths, { password, expireDays = 0 } 
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
   });
   return { link: data.link, shareid: data.shareid, password: password || null };
+}
+
+export async function createFolder(remotePath) {
+  const token = await getValidAccessToken();
+  const url = new URL(API_BASE);
+  url.searchParams.set("method", "create");
+  url.searchParams.set("access_token", token);
+  const body = new URLSearchParams({
+    path: remotePath,
+    isdir: "1",
+    rtype: "0", // don't auto-rename; error out if the name is taken
+  });
+  const data = await apiPost(url, body, {
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  });
+  return { path: data.path, fs_id: data.fs_id };
+}
+
+// Delete/move/rename all go through the same filemanager endpoint; it can
+// report per-item failures inside `info` even when the top-level errno is 0.
+async function fileManager(opera, filelist, ondup) {
+  const token = await getValidAccessToken();
+  const url = new URL(API_BASE);
+  url.searchParams.set("method", "filemanager");
+  url.searchParams.set("access_token", token);
+  url.searchParams.set("opera", opera);
+  const body = new URLSearchParams({
+    async: "0", // synchronous, so the result reflects the finished operation
+    filelist: JSON.stringify(filelist),
+  });
+  if (ondup) body.set("ondup", ondup);
+  const data = await apiPost(url, body, {
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  });
+  if ((data.info || []).some((i) => i.errno && i.errno !== 0)) throw baiduError(data);
+  return data.info || [];
+}
+
+export async function deletePaths(remotePaths) {
+  const paths = Array.isArray(remotePaths) ? remotePaths : [remotePaths];
+  if (paths.some((p) => path.posix.normalize(p) === "/")) {
+    throw new Error("Refusing to delete the netdisk root");
+  }
+  await fileManager("delete", paths);
+  return { deleted: paths };
+}
+
+export async function movePaths(items, ondup = "fail") {
+  const filelist = items.map(({ path: p, destDir, newName }) => ({
+    path: p,
+    dest: destDir,
+    newname: newName || path.posix.basename(p),
+  }));
+  await fileManager("move", filelist, ondup);
+  return {
+    moved: filelist.map((f) => ({ from: f.path, to: path.posix.join(f.dest, f.newname) })),
+  };
+}
+
+export async function renamePath(remotePath, newName) {
+  if (newName.includes("/")) throw new Error("newName must be a bare name, not a path");
+  await fileManager("rename", [{ path: remotePath, newname: newName }]);
+  return { from: remotePath, to: path.posix.join(path.posix.dirname(remotePath), newName) };
 }
