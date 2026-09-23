@@ -55,6 +55,67 @@ claude mcp add baidu-netdisk node /绝对路径/baidu-netdisk-mcp/src/server.js
 
 如果用命令行添加，记得在运行 Claude Code 前把 `BAIDU_APP_KEY`/`BAIDU_SECRET_KEY` 也导出到环境变量，或者改用上面的 `.mcp.json` 写法把 env 写死在配置里。
 
+## 部署到云端（远程 HTTP 模式）
+
+默认的 `src/server.js` 用的是 stdio transport，只能被 Claude Code 当子进程拉起、跑在本地。要放到云端随时连，用 `src/httpServer.js`（Streamable HTTP transport + Bearer token 鉴权）。
+
+**重要：** 这个 server 一旦跑起来并公网可达，任何拿到 `MCP_AUTH_TOKEN` 的人都能用你的百度网盘账号操作文件；`refresh_token` 也会常驻在云主机上。请只部署在你自己控制的服务器上，务必配 TLS，`MCP_AUTH_TOKEN` 当密码一样保管。
+
+### 1. 先在本地完成一次性授权
+
+`npm run authorize` 必须能弹出浏览器登录，建议还是在本地机器上先跑一次，拿到 `~/.baidu-netdisk-mcp/tokens.json`，再把这个文件拷到云主机上（或者直接在云主机上跑 `npm run authorize`，只要它能出网访问 `openapi.baidu.com` 即可）。
+
+### 2. 生成鉴权密钥
+
+```bash
+openssl rand -hex 32
+```
+
+把结果填进云主机的 `.env` 的 `MCP_AUTH_TOKEN`。
+
+### 3a. 直接用 Node 跑
+
+```bash
+npm install
+npm run start:http
+# 监听 http://0.0.0.0:3000/mcp
+```
+
+### 3b. 用 Docker 跑
+
+```bash
+docker build -t baidu-netdisk-mcp .
+docker run -d \
+  --name baidu-netdisk-mcp \
+  -p 127.0.0.1:3000:3000 \
+  --env-file .env \
+  -v ~/.baidu-netdisk-mcp:/root/.baidu-netdisk-mcp \
+  baidu-netdisk-mcp
+```
+
+`-v` 把 token 存储目录挂进容器，否则容器重启会丢 token、得重新授权。
+
+### 4. 前面套一层 TLS 反代
+
+不要把 3000 端口直接暴露到公网（Bearer token 走明文 HTTP 等于裸奔）。最简单是用 [Caddy](https://caddyserver.com/)（自动签证书），参考仓库里的 `Caddyfile.example`：
+
+```
+your-domain.example.com {
+    reverse_proxy 127.0.0.1:3000
+}
+```
+
+`caddy run` 起来后，对外地址就是 `https://your-domain.example.com/mcp`。
+
+### 5. 在 Claude Code 里连远程 server
+
+```bash
+claude mcp add --transport http baidu-netdisk https://your-domain.example.com/mcp \
+  --header "Authorization: Bearer 你的MCP_AUTH_TOKEN"
+```
+
+（`claude mcp add` 的具体参数以你本地 `claude mcp add --help` 为准，不同版本可能有出入。）
+
 ## 提供的工具
 
 | 工具 | 说明 |
@@ -70,3 +131,4 @@ claude mcp add baidu-netdisk node /绝对路径/baidu-netdisk-mcp/src/server.js
 - 未在本机实际跑通（环境没有 node），逻辑基于百度开放平台公开文档实现，接入后如遇 `errno` 报错，多半是该应用未获得对应接口权限，去开发者后台查看接口权限列表。
 - 个人开发者应用通常有网盘容量/接口调用频率限制（历史上常见 20GB 总量限制），大文件上传前请确认额度。
 - 上传分片大小固定 4MB，超大文件会顺序上传多个分片，暂无并发/断点续传。
+- HTTP 模式（`src/httpServer.js`）用的是无状态（stateless）Streamable HTTP，每个请求起一个新的 McpServer 实例，实现简单但没有服务端主动推送/多会话能力；单用户个人使用够用，多人共用建议按用户拆 token 存储路径。
